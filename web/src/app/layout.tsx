@@ -45,7 +45,7 @@ export default function RootLayout({
                 </Link>
                 <p className="mt-6 max-w-lg text-sm leading-relaxed text-[#A8ADA7]">
                   The workplace intelligence desk. Anonymous by design. 
-                  Because the truth shouldn't cost you your job.
+                  Because the truth shouldn&apos;t cost you your job.
                 </p>
                 <p className="mt-6 text-xs uppercase tracking-[0.4em] text-[#C7F36B]/80">
                   Know before you join
