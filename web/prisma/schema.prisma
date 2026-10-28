@@ -1,0 +1,454 @@
+// LinkedOut — Prisma schema (v0.1 MVP)
+// Source of truth: LinkedOut_PRD_v0.1.pdf
+//
+// Core privacy rule: `Review.userId` and `Comment.userId` exist ONLY so we can
+// moderate, detect duplicates and prevent abuse. They must never be selected by
+// any public query, serialised into a public API response, or rendered on a page.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum EmploymentStatus {
+  CURRENT
+  FORMER
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+  FREELANCE
+}
+
+enum LeaveReason {
+  COMPENSATION
+  MANAGEMENT
+  WORK_LIFE_BALANCE
+  WORKPLACE_CULTURE
+  CAREER_GROWTH
+  WORKING_CONDITIONS
+  BETTER_OPPORTUNITY
+  RELOCATION
+  EDUCATION
+  PERSONAL_REASONS
+  OTHER
+}
+
+// PENDING -> APPROVED -> PUBLISHED
+// PENDING -> REJECTED
+// PUBLISHED -> FLAGGED -> REVIEWED
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  PUBLISHED
+  REJECTED
+  FLAGGED
+  REMOVED
+}
+
+enum ReportReason {
+  HARASSMENT
+  SPAM
+  PERSONAL_INFORMATION
+  FALSE_MISLEADING
+  HATE_ABUSIVE
+  OFF_TOPIC
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+enum ReportTarget {
+  REVIEW
+  COMMENT
+}
+
+enum ReactionType {
+  HELPFUL
+}
+
+enum ModerationActionType {
+  APPROVE
+  REJECT
+  FLAG
+  REMOVE
+  RESTORE
+  HIDE
+  SUSPEND_USER
+  RESTORE_USER
+}
+
+enum CompanyStatus {
+  ACTIVE
+  HIDDEN
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  DOMAIN_VERIFIED
+  MANUALLY_VERIFIED
+}
+
+// ---------------------------------------------------------------------------
+// Users & auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  passwordHash  String
+  emailVerified DateTime?
+  role          Role       @default(USER)
+  status        UserStatus @default(ACTIVE)
+
+  displayName String?
+  lastLoginAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviews     Review[]
+  comments    Comment[]
+  reactions   Reaction[]
+  reports     Report[]          @relation("ReportAuthor")
+  saved       SavedCompany[]
+  employments Employment[]
+  moderation  ModerationAction[] @relation("Moderator")
+  auditLogs   AuditLog[]        @relation("AuditActor")
+  tokens      VerificationToken[]
+
+  @@index([status])
+  @@map("users")
+}
+
+model VerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  purpose   String // "email_verify" | "password_reset"
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, purpose])
+  @@map("verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Companies
+// ---------------------------------------------------------------------------
+
+model Company {
+  id          String        @id @default(cuid())
+  name        String
+  slug        String        @unique
+  logoUrl     String?
+  industry    String?
+  description String?
+  website     String?
+  status      CompanyStatus @default(ACTIVE)
+
+  // Country -> State/Region -> City from day one, so we are never locked to Lagos.
+  country String @default("Nigeria")
+  region  String? // state / region
+  city    String?
+
+  verification VerificationStatus @default(UNVERIFIED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviews     Review[]
+  employments Employment[]
+  savedBy     SavedCompany[]
+  mergedIntoId String?
+  mergedInto   Company?  @relation("CompanyMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom   Company[] @relation("CompanyMerge")
+
+  // Denormalised aggregate, recalculated from eligible (PUBLISHED) reviews.
+  reviewCount   Int   @default(0)
+  ratingAverage Float?
+
+  @@index([name])
+  @@index([country, region, city])
+  @@index([industry])
+  @@map("companies")
+}
+
+// ---------------------------------------------------------------------------
+// Employment attestation (internal only — used for review eligibility/trust)
+// ---------------------------------------------------------------------------
+
+model Employment {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  jobTitle      String?
+  type          EmploymentType?
+  employmentStatus EmploymentStatus
+  startedAt     DateTime?
+  endedAt       DateTime?
+
+  verified   Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  reviews Review[]
+
+  @@index([userId, companyId])
+  @@map("employments")
+}
+
+// ---------------------------------------------------------------------------
+// Reviews
+// ---------------------------------------------------------------------------
+
+model Review {
+  id String @id @default(cuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // INTERNAL ONLY. Never expose publicly.
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  employmentId String?
+  employment   Employment? @relation(fields: [employmentId], references: [id], onDelete: SetNull)
+
+  employmentStatus EmploymentStatus
+  jobTitle         String
+  jobCategory      String?
+  employmentType   EmploymentType?
+  city             String?
+
+  // Length of employment, in months.
+  employmentLengthMonths Int?
+
+  overallRating Int // 1..5
+  pros          String?
+  cons          String?
+  body          String
+  wouldRecommend Boolean?
+
+  leaveReason LeaveReason?
+
+  status           ModerationStatus @default(PENDING)
+  moderationNote   String?
+  publishedAt      DateTime?
+  helpfulCount     Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ratings   ReviewRating?
+  comments  Comment[]
+  reactions Reaction[]
+  reports   Report[]
+  tags      ReviewTag[]
+  actions   ModerationAction[]
+
+  @@index([companyId, status, publishedAt])
+  @@index([userId, companyId])
+  @@index([status])
+  @@map("reviews")
+}
+
+// Strict subset of categories that count toward the public rating.
+model ReviewRating {
+  id       String @id @default(cuid())
+  reviewId String @unique
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  compensation     Int?
+  management       Int?
+  workLifeBalance  Int?
+  careerGrowth     Int?
+  workplaceCulture Int?
+
+  @@map("review_ratings")
+}
+
+// ---------------------------------------------------------------------------
+// Funny-but-structured workplace tropes (our signature, safe alternative to
+// free-text roasting). Curated by admins, selected by reviewers, aggregated.
+// ---------------------------------------------------------------------------
+
+model WorkplaceTag {
+  id       String @id @default(cuid())
+  slug     String @unique
+  label    String // e.g. "We are a family"
+  emoji    String?
+  blurb    String? // cheeky one-liner shown on hover
+  category String // culture | pay | management | hours | perks | exit
+  active   Boolean @default(true)
+
+  reviews ReviewTag[]
+
+  @@map("workplace_tags")
+}
+
+model ReviewTag {
+  reviewId String
+  review   Review       @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  tagId    String
+  tag      WorkplaceTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([reviewId, tagId])
+  @@index([tagId])
+  @@map("review_tags")
+}
+
+// ---------------------------------------------------------------------------
+// Engagement
+// ---------------------------------------------------------------------------
+
+model Comment {
+  id       String @id @default(cuid())
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  // INTERNAL ONLY. Never expose publicly.
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  body   String
+  status ModerationStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reports Report[]
+
+  @@index([reviewId, status])
+  @@map("comments")
+}
+
+model Reaction {
+  id       String @id @default(cuid())
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  // INTERNAL ONLY. Never expose publicly.
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      ReactionType @default(HELPFUL)
+  createdAt DateTime     @default(now())
+
+  @@unique([reviewId, userId, type])
+  @@map("reactions")
+}
+
+model Report {
+  id String @id @default(cuid())
+
+  reporterId String
+  reporter   User   @relation("ReportAuthor", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  targetType ReportTarget
+  reviewId   String?
+  review     Review? @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  commentId  String?
+  comment    Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  reason  ReportReason
+  details String?
+  status  ReportStatus @default(OPEN)
+  resolutionNote String?
+  resolvedAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([status])
+  @@index([reviewId])
+  @@index([commentId])
+  @@map("reports")
+}
+
+model SavedCompany {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, companyId])
+  @@map("saved_companies")
+}
+
+// ---------------------------------------------------------------------------
+// Moderation & audit
+// ---------------------------------------------------------------------------
+
+model ModerationAction {
+  id     String @id @default(cuid())
+  actorId String
+  actor   User   @relation("Moderator", fields: [actorId], references: [id], onDelete: Restrict)
+
+  action     ModerationActionType
+  reviewId   String?
+  review     Review? @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  commentId  String?
+
+  fromStatus ModerationStatus?
+  toStatus   ModerationStatus?
+  note       String?
+
+  createdAt DateTime @default(now())
+
+  @@index([reviewId])
+  @@index([createdAt])
+  @@map("moderation_actions")
+}
+
+model AuditLog {
+  id      String @id @default(cuid())
+  actorId String?
+  actor   User?  @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  action   String
+  entity   String
+  entityId String?
+  metadata Json?
+  ipHash   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
